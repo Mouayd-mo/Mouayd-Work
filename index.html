@@ -663,4 +663,1120 @@
         const STORAGE_KEYS = {
             CUSTOMERS: 'souq_elec_customers_v1',
             TRANSACTIONS: 'souq_elec_transactions_v1',
-            SETTINGS: 'souq_elec_settings_v
+            SETTINGS: 'souq_elec_settings_v1',
+            DEMO_FLAG: 'souq_elec_demo_initialized_v1'
+        };
+
+        // Default Firebase Config for project my-work-a64fa
+        const DEFAULT_FIREBASE_CONFIG = {
+            apiKey: "AIzaSyAIwwzXtu1e8Uvxw7148X4O_2AYaobvZi0",
+            authDomain: "my-work-a64fa.firebaseapp.com",
+            projectId: "my-work-a64fa",
+            storageBucket: "my-work-a64fa.firebasestorage.app",
+            messagingSenderId: "569577232364",
+            appId: "1:569577232364:web:fd5b02daffbd56456b12c9",
+            measurementId: "G-300ZX6H0PV"
+        };
+
+        // App State
+        let customers = [];
+        let transactions = [];
+        let settings = {
+            role: 'صاحب المحل',
+            shopCode: 'SOUQ-ELEC-01',
+            firebaseConfig: { ...DEFAULT_FIREBASE_CONFIG }
+        };
+
+        let currentCustomerFilter = 'all';
+        let activeLedgerCustomerId = null;
+        let compressedPhotosBase64 = [];
+        let returnToEntryAfterNewCust = false;
+
+        // Photo Viewer State
+        let viewerPhotosList = [];
+        let viewerPhotoIndex = 0;
+        let viewerPhotoCaption = '';
+
+        // Cloud State
+        let isCloudConnected = false;
+        let firebaseDb = null;
+        let unsubCloudCustomers = null;
+        let unsubCloudTransactions = null;
+
+        // Safe LocalStorage Helpers
+        function readStorage(key, fallback) {
+            try {
+                const raw = localStorage.getItem(key);
+                return raw ? JSON.parse(raw) : fallback;
+            } catch (e) {
+                return fallback;
+            }
+        }
+
+        function writeStorage(key, value) {
+            try {
+                localStorage.setItem(key, JSON.stringify(value));
+            } catch (e) {
+                console.warn('Storage quota warning:', e);
+                showToast('ذاكرة المتصفح ممتلئة، يفضل تفعيل المزامنة السحابية أو تقليل الصور', 'warning');
+            }
+        }
+
+        // Normalize transaction images (supports multi-photo imagesData & legacy imageData)
+        function getTransactionImages(tx) {
+            if (Array.isArray(tx.imagesData) && tx.imagesData.length > 0) {
+                return tx.imagesData.filter(Boolean);
+            }
+            if (tx.imageData) {
+                return [tx.imageData];
+            }
+            return [];
+        }
+
+        // Load Settings
+        function loadAppSettings() {
+            const saved = readStorage(STORAGE_KEYS.SETTINGS, null);
+            if (saved) {
+                settings = {
+                    role: saved.role || 'صاحب المحل',
+                    shopCode: saved.shopCode || 'SOUQ-ELEC-01',
+                    firebaseConfig: saved.firebaseConfig || { ...DEFAULT_FIREBASE_CONFIG }
+                };
+            } else {
+                settings.firebaseConfig = { ...DEFAULT_FIREBASE_CONFIG };
+            }
+            applySettingsToUI();
+        }
+
+        function applySettingsToUI() {
+            document.getElementById('role-badge-text').textContent = settings.role;
+            document.getElementById('entry-author-label').textContent = settings.role;
+            document.getElementById('setup-shop-code').value = settings.shopCode;
+
+            const iconEl = document.getElementById('role-icon');
+            iconEl.className = settings.role === 'صاحب المحل'
+                ? 'fa-solid fa-crown text-volt-400'
+                : 'fa-solid fa-calculator text-emerald-300';
+
+            const btnOwner = document.getElementById('setup-role-owner');
+            const btnAcc = document.getElementById('setup-role-accountant');
+            if (settings.role === 'صاحب المحل') {
+                btnOwner.className = 'p-3 rounded-2xl border-2 border-blue-600 bg-blue-50 text-blue-900 font-extrabold text-xs flex items-center justify-center gap-2';
+                btnAcc.className = 'p-3 rounded-2xl border border-slate-200 bg-white text-slate-600 font-bold text-xs flex items-center justify-center gap-2';
+            } else {
+                btnAcc.className = 'p-3 rounded-2xl border-2 border-blue-600 bg-blue-50 text-blue-900 font-extrabold text-xs flex items-center justify-center gap-2';
+                btnOwner.className = 'p-3 rounded-2xl border border-slate-200 bg-white text-slate-600 font-bold text-xs flex items-center justify-center gap-2';
+            }
+
+            if (settings.firebaseConfig) {
+                document.getElementById('firebase-config-input').value = JSON.stringify(settings.firebaseConfig, null, 2);
+            }
+        }
+
+        // Populate Realistic Damascus Electrical Shop Demo Data on First Visit
+        function seedRealisticDemoData() {
+            const alreadyInitialized = readStorage(STORAGE_KEYS.DEMO_FLAG, false);
+            if (alreadyInitialized) {
+                customers = readStorage(STORAGE_KEYS.CUSTOMERS, []);
+                transactions = readStorage(STORAGE_KEYS.TRANSACTIONS, []);
+                document.getElementById('demo-banner').classList.add('hidden');
+                return;
+            }
+
+            const now = Date.now();
+            customers = [
+                {
+                    id: 'cust-1',
+                    name: 'مؤسسة النور للتعهدات الكهربائية',
+                    phone: '0933123456',
+                    notes: 'متعهد مشاريع سكنية وتجارية - سوق الكهرباء',
+                    createdAt: now - 86400000 * 4
+                },
+                {
+                    id: 'cust-2',
+                    name: 'المهندس سامر - ورشة المزة',
+                    phone: '0944987654',
+                    notes: 'تمديدات صناعية ولوحات تحكم',
+                    createdAt: now - 86400000 * 2
+                },
+                {
+                    id: 'cust-3',
+                    name: 'شركة الشام للإنارة الحديثة',
+                    phone: '0955112233',
+                    notes: 'زبون جملة - إنارة LED',
+                    createdAt: now - 86400000
+                }
+            ];
+
+            transactions = [
+                {
+                    id: 'tx-1',
+                    type: 'invoice',
+                    invoiceNumber: 'INV-101',
+                    customerId: 'cust-1',
+                    customerName: 'مؤسسة النور للتعهدات الكهربائية',
+                    amount: 3500000,
+                    currency: 'SYP',
+                    note: 'كابلات نحاس 4 مم + قواطع شنايدر 32 أمبير',
+                    imagesData: [],
+                    imageData: null,
+                    author: 'صاحب المحل',
+                    timestamp: now - 7200000 * 3
+                },
+                {
+                    id: 'tx-2',
+                    type: 'payment',
+                    invoiceNumber: '',
+                    customerId: 'cust-1',
+                    customerName: 'مؤسسة النور للتعهدات الكهربائية',
+                    amount: 1000000,
+                    currency: 'SYP',
+                    note: 'دفعة نقدية على الحساب',
+                    imagesData: [],
+                    imageData: null,
+                    author: 'المحاسب',
+                    timestamp: now - 3600000 * 2
+                },
+                {
+                    id: 'tx-3',
+                    type: 'invoice',
+                    invoiceNumber: 'INV-102',
+                    customerId: 'cust-1',
+                    customerName: 'مؤسسة النور للتعهدات الكهربائية',
+                    amount: 150,
+                    currency: 'USD',
+                    note: 'قاطع رئيسي 3 فاز 100A مع علبة صاج',
+                    imagesData: [],
+                    imageData: null,
+                    author: 'صاحب المحل',
+                    timestamp: now - 5400000
+                },
+                {
+                    id: 'tx-4',
+                    type: 'invoice',
+                    invoiceNumber: 'INV-103',
+                    customerId: 'cust-2',
+                    customerName: 'المهندس سامر - ورشة المزة',
+                    amount: 850000,
+                    currency: 'SYP',
+                    note: 'بروجكتورات LED 100W عدد 20 + شريط لاصق',
+                    imagesData: [],
+                    imageData: null,
+                    author: 'المحاسب',
+                    timestamp: now - 2700000
+                },
+                {
+                    id: 'tx-5',
+                    type: 'invoice',
+                    invoiceNumber: 'INV-104',
+                    customerId: 'cust-3',
+                    customerName: 'شركة الشام للإنارة الحديثة',
+                    amount: 1200000,
+                    currency: 'SYP',
+                    note: 'سبوتات سقفية دائرية 18 واط',
+                    imagesData: [],
+                    imageData: null,
+                    author: 'المحاسب',
+                    timestamp: now - 1800000
+                },
+                {
+                    id: 'tx-6',
+                    type: 'payment',
+                    invoiceNumber: '',
+                    customerId: 'cust-3',
+                    customerName: 'شركة الشام للإنارة الحديثة',
+                    amount: 1200000,
+                    currency: 'SYP',
+                    note: 'تسديد كامل الفاتورة نقداً',
+                    imagesData: [],
+                    imageData: null,
+                    author: 'صاحب المحل',
+                    timestamp: now - 900000
+                }
+            ];
+
+            writeStorage(STORAGE_KEYS.CUSTOMERS, customers);
+            writeStorage(STORAGE_KEYS.TRANSACTIONS, transactions);
+            writeStorage(STORAGE_KEYS.DEMO_FLAG, true);
+            document.getElementById('demo-banner').classList.remove('hidden');
+        }
+
+        window.clearDemoData = function() {
+            customers = [];
+            transactions = [];
+            writeStorage(STORAGE_KEYS.CUSTOMERS, customers);
+            writeStorage(STORAGE_KEYS.TRANSACTIONS, transactions);
+            writeStorage(STORAGE_KEYS.DEMO_FLAG, true);
+            document.getElementById('demo-banner').classList.add('hidden');
+            refreshUI();
+            showToast('تم مسح البيانات التجريبية، الدفتر جاهز لبيانات محلك!', 'success');
+        };
+
+        // Initialize Cloud Sync if Firebase Config exists
+        async function initSyncEngine() {
+            if (!settings.firebaseConfig || !settings.firebaseConfig.apiKey) {
+                isCloudConnected = false;
+                document.getElementById('sync-dot').className = 'w-2 h-2 rounded-full bg-amber-400';
+                document.getElementById('sync-status-text').textContent = 'تخزين محلي تجريبي';
+                seedRealisticDemoData();
+                refreshUI();
+                return;
+            }
+
+            try {
+                if (getApps().length > 0) {
+                    await Promise.all(getApps().map(app => deleteApp(app)));
+                }
+                const app = initializeApp(settings.firebaseConfig);
+                const auth = getAuth(app);
+                firebaseDb = getFirestore(app);
+
+                await signInAnonymously(auth);
+                onAuthStateChanged(auth, (user) => {
+                    if (user) {
+                        isCloudConnected = true;
+                        document.getElementById('sync-dot').className = 'w-2 h-2 rounded-full bg-emerald-400 animate-pulse';
+                        document.getElementById('sync-status-text').textContent = `متصل سحابياً - متزامن (${settings.shopCode})`;
+                        document.getElementById('demo-banner').classList.add('hidden');
+                        subscribeToCloudCollections();
+                    }
+                });
+            } catch (err) {
+                console.error('Firebase init failed:', err);
+                isCloudConnected = false;
+                document.getElementById('sync-dot').className = 'w-2 h-2 rounded-full bg-rose-500';
+                document.getElementById('sync-status-text').textContent = 'خطأ بالاتصال السحابي - وضع محلي';
+                seedRealisticDemoData();
+                refreshUI();
+                showToast('تعذر الاتصال السحابي، تأكد من صحة بيانات Firebase', 'error');
+            }
+        }
+
+        function subscribeToCloudCollections() {
+            if (!firebaseDb) return;
+            if (unsubCloudCustomers) unsubCloudCustomers();
+            if (unsubCloudTransactions) unsubCloudTransactions();
+
+            const shopId = settings.shopCode || 'SOUQ-ELEC-01';
+            const custRef = collection(firebaseDb, 'shops', shopId, 'customers');
+            const txRef = collection(firebaseDb, 'shops', shopId, 'transactions');
+
+            unsubCloudCustomers = onSnapshot(query(custRef), (snap) => {
+                const arr = [];
+                snap.forEach(d => arr.push({ id: d.id, ...d.data() }));
+                customers = arr.sort((a, b) => (b.createdAt || 0) - (a.createdAt || 0));
+                refreshUI();
+            }, (err) => {
+                console.error(err);
+                showToast('تحقق من صلاحيات Firestore Rules في حسابك', 'error');
+            });
+
+            unsubCloudTransactions = onSnapshot(query(txRef), (snap) => {
+                const arr = [];
+                snap.forEach(d => arr.push({ id: d.id, ...d.data() }));
+                transactions = arr.sort((a, b) => (b.timestamp || 0) - (a.timestamp || 0));
+                refreshUI();
+            });
+        }
+
+        // Formatting & Balance Calculations
+        function formatNum(val) {
+            return Number(val || 0).toLocaleString('en-US', { maximumFractionDigits: 2 });
+        }
+
+        function computeCustomerBalance(custId) {
+            let syp = 0;
+            let usd = 0;
+            transactions.forEach(tx => {
+                if (tx.customerId === custId) {
+                    const amt = Number(tx.amount) || 0;
+                    if (tx.type === 'invoice') {
+                        if (tx.currency === 'USD') usd += amt;
+                        else syp += amt;
+                    } else if (tx.type === 'payment') {
+                        if (tx.currency === 'USD') usd -= amt;
+                        else syp -= amt;
+                    }
+                }
+            });
+            return { syp, usd };
+        }
+
+        function refreshUI() {
+            updateKPIs();
+            renderActivityFeed();
+            renderCustomersList();
+            populateCustomerSelect();
+            if (activeLedgerCustomerId) {
+                renderLedgerModalContent(activeLedgerCustomerId);
+            }
+        }
+
+        function updateKPIs() {
+            let totalDebtSyp = 0;
+            let totalDebtUsd = 0;
+            let todayPaidSyp = 0;
+            const todayDate = new Date().toLocaleDateString('en-CA');
+
+            customers.forEach(c => {
+                const bal = computeCustomerBalance(c.id);
+                if (bal.syp > 0) totalDebtSyp += bal.syp;
+                if (bal.usd > 0) totalDebtUsd += bal.usd;
+            });
+
+            transactions.forEach(tx => {
+                const txDate = new Date(tx.timestamp).toLocaleDateString('en-CA');
+                if (tx.type === 'payment' && txDate === todayDate) {
+                    if (tx.currency === 'SYP') todayPaidSyp += Number(tx.amount);
+                }
+            });
+
+            document.getElementById('kpi-debt-syp').textContent = `${formatNum(totalDebtSyp)} ل.س`;
+            document.getElementById('kpi-debt-usd').textContent = `${formatNum(totalDebtUsd)} $`;
+            document.getElementById('kpi-today-paid').textContent = `${formatNum(todayPaidSyp)} ل.س`;
+            document.getElementById('feed-count-badge').textContent = `${transactions.length} حركة`;
+        }
+
+        // Render Live Activity Feed
+        function renderActivityFeed() {
+            const container = document.getElementById('activity-feed-list');
+            if (transactions.length === 0) {
+                container.innerHTML = `
+                    <div class="bg-white rounded-3xl p-8 text-center border border-slate-100">
+                        <i class="fa-solid fa-receipt text-3xl text-slate-300 mb-2"></i>
+                        <p class="font-bold text-sm text-slate-600">لا توجد حركات مسجلة حتى الآن</p>
+                        <p class="text-xs text-slate-400 mt-1">اضغط على زر (+ تسجيل فاتورة) أو (+ تسجيل دفعة) للبدء</p>
+                    </div>`;
+                return;
+            }
+            container.innerHTML = transactions.map(tx => createTransactionCardHTML(tx, true)).join('');
+        }
+
+        function createTransactionCardHTML(tx, showCustomerLink = true) {
+            const isInvoice = tx.type === 'invoice';
+            const iconBg = isInvoice ? 'bg-rose-100 text-rose-600' : 'bg-emerald-100 text-emerald-600';
+            const amountColor = isInvoice ? 'text-rose-600' : 'text-emerald-600';
+            const typeBadge = isInvoice
+                ? '<span class="bg-rose-50 text-rose-700 border border-rose-200 px-2 py-0.5 rounded-md text-[10px] font-extrabold">فاتورة</span>'
+                : '<span class="bg-emerald-50 text-emerald-700 border border-emerald-200 px-2 py-0.5 rounded-md text-[10px] font-extrabold">دفعة</span>';
+
+            const invBadge = tx.invoiceNumber
+                ? `<span class="bg-slate-100 text-slate-800 border border-slate-200 px-2 py-0.5 rounded-md text-[10px] font-extrabold">#${tx.invoiceNumber}</span>`
+                : '';
+
+            const currencySymbol = tx.currency === 'USD' ? '$' : 'ل.س';
+            const formattedAmount = `${formatNum(tx.amount)} ${currencySymbol}`;
+            const dateObj = new Date(tx.timestamp);
+            const dateStr = dateObj.toLocaleDateString('ar-SY', { month: 'short', day: 'numeric' });
+            const timeStr = dateObj.toLocaleTimeString('ar-SY', { hour: '2-digit', minute: '2-digit' });
+
+            const cust = customers.find(c => c.id === tx.customerId);
+            const custName = cust ? cust.name : (tx.customerName || 'زبون غير محدد');
+
+            const authorBadgeClass = tx.author === 'صاحب المحل'
+                ? 'bg-amber-50 text-amber-800 border-amber-200'
+                : 'bg-blue-50 text-blue-800 border-blue-200';
+
+            const imgs = getTransactionImages(tx);
+            const photoButton = imgs.length > 0 ? `
+                <button onclick="openPhotoViewer('${tx.id}', 0)" class="inline-flex items-center gap-1.5 text-[11px] font-extrabold text-blue-700 bg-blue-50 hover:bg-blue-100 border border-blue-200 px-2.5 py-1 rounded-xl transition">
+                    <i class="fa-solid fa-images"></i>
+                    <span>عرض الصور (${imgs.length})</span>
+                </button>` : '';
+
+            const thumbsHtml = imgs.length > 0 ? `
+                <div class="flex items-center gap-1.5 pt-1 overflow-x-auto">
+                    ${imgs.map((src, idx) => `
+                        <button type="button" onclick="openPhotoViewer('${tx.id}', ${idx})" class="w-11 h-11 rounded-xl overflow-hidden border border-slate-200 bg-slate-100 shrink-0 relative group">
+                            <img src="${src}" alt="صورة ${idx + 1}" class="w-full h-full object-cover">
+                        </button>
+                    `).join('')}
+                </div>` : '';
+
+            return `
+                <div class="bg-white p-3.5 rounded-2xl shadow-sm border border-slate-200/80 space-y-2">
+                    <div class="flex items-start justify-between gap-2">
+                        <div class="flex items-start gap-2.5">
+                            <div class="w-10 h-10 rounded-2xl ${iconBg} flex items-center justify-center shrink-0 mt-0.5">
+                                <i class="fa-solid ${isInvoice ? 'fa-file-invoice-dollar' : 'fa-hand-holding-dollar'} text-base"></i>
+                            </div>
+                            <div>
+                                ${showCustomerLink ? `<div onclick="openCustomerLedger('${tx.customerId}')" class="font-extrabold text-sm text-slate-900 hover:text-blue-700 cursor-pointer">${custName}</div>` : ''}
+                                <div class="flex items-center gap-1.5 mt-0.5 flex-wrap">
+                                    ${typeBadge}
+                                    ${invBadge}
+                                    <span class="text-xs font-semibold text-slate-600">${tx.note || (isInvoice ? 'فاتورة مواد كهربائية' : 'دفعة نقدية')}</span>
+                                </div>
+                            </div>
+                        </div>
+                        <div class="text-left shrink-0">
+                            <div class="font-extrabold text-sm ${amountColor}" dir="ltr">${isInvoice ? '+' : '-'} ${formattedAmount}</div>
+                            <div class="text-[10px] text-slate-400 mt-0.5">${dateStr} • ${timeStr}</div>
+                        </div>
+                    </div>
+
+                    ${thumbsHtml}
+
+                    <div class="flex items-center justify-between pt-2 border-t border-slate-100 text-[11px]">
+                        <span class="px-2 py-0.5 rounded-lg border ${authorBadgeClass} font-bold">
+                            بواسطة: ${tx.author || 'صاحب المحل'}
+                        </span>
+                        <div class="flex items-center gap-2">
+                            ${photoButton}
+                            <button onclick="confirmDeleteTransaction('${tx.id}')" class="text-slate-300 hover:text-rose-600 p-1 transition" title="حذف الحركة">
+                                <i class="fa-solid fa-trash-can"></i>
+                            </button>
+                        </div>
+                    </div>
+                </div>
+            `;
+        }
+
+        // Search & Render Customers List (Supports Name, Phone, Invoice Number & Note)
+        window.clearCustomerSearch = function() {
+            const input = document.getElementById('search-customer-input');
+            input.value = '';
+            document.getElementById('clear-customer-search-btn').classList.add('hidden');
+            renderCustomersList();
+        };
+
+        window.renderCustomersList = function() {
+            const container = document.getElementById('customers-cards-list');
+            const inputEl = document.getElementById('search-customer-input');
+            const clearBtn = document.getElementById('clear-customer-search-btn');
+            const queryText = (inputEl ? inputEl.value : '').toLowerCase().trim();
+
+            if (clearBtn) {
+                if (queryText) clearBtn.classList.remove('hidden');
+                else clearBtn.classList.add('hidden');
+            }
+
+            const filtered = customers.filter(c => {
+                const matchesCustomerInfo =
+                    (c.name && c.name.toLowerCase().includes(queryText)) ||
+                    (c.phone && c.phone.toLowerCase().includes(queryText)) ||
+                    (c.notes && c.notes.toLowerCase().includes(queryText));
+
+                const matchesCustomerTx = transactions.some(tx =>
+                    tx.customerId === c.id && (
+                        (tx.invoiceNumber && String(tx.invoiceNumber).toLowerCase().includes(queryText)) ||
+                        (tx.note && String(tx.note).toLowerCase().includes(queryText))
+                    )
+                );
+
+                const matchesSearch = !queryText || matchesCustomerInfo || matchesCustomerTx;
+                if (!matchesSearch) return false;
+
+                const bal = computeCustomerBalance(c.id);
+                const hasBalance = bal.syp > 0 || bal.usd > 0;
+                if (currentCustomerFilter === 'debt') return hasBalance;
+                if (currentCustomerFilter === 'clear') return !hasBalance;
+                return true;
+            });
+
+            if (filtered.length === 0) {
+                container.innerHTML = `
+                    <div class="bg-white rounded-3xl p-8 text-center border border-slate-100">
+                        <i class="fa-solid fa-users-slash text-3xl text-slate-300 mb-2"></i>
+                        <p class="font-bold text-sm text-slate-600">لا يوجد زبائن مطابقون للبحث</p>
+                    </div>`;
+                return;
+            }
+
+            container.innerHTML = filtered.map(c => {
+                const bal = computeCustomerBalance(c.id);
+                const owesMoney = bal.syp > 0 || bal.usd > 0;
+                const avatarStyle = owesMoney ? 'bg-rose-50 text-rose-600 border-rose-200' : 'bg-emerald-50 text-emerald-600 border-emerald-200';
+
+                const matchedInvoices = queryText
+                    ? transactions
+                        .filter(tx => tx.customerId === c.id && tx.invoiceNumber && String(tx.invoiceNumber).toLowerCase().includes(queryText))
+                        .map(tx => `#${tx.invoiceNumber}`)
+                    : [];
+
+                const matchedInvoiceBadge = matchedInvoices.length > 0
+                    ? `<div class="mt-1"><span class="bg-blue-50 text-blue-700 border border-blue-200 px-2 py-0.5 rounded-md text-[10px] font-extrabold">فاتورة مطابقة: ${matchedInvoices.join('، ')}</span></div>`
+                    : '';
+
+                return `
+                    <div onclick="openCustomerLedger('${c.id}')" class="bg-white p-3.5 rounded-2xl shadow-sm border border-slate-200/80 flex items-center justify-between gap-2 active:scale-[0.99] transition cursor-pointer">
+                        <div class="flex items-center gap-3 min-w-0">
+                            <div class="w-11 h-11 rounded-2xl border ${avatarStyle} font-extrabold text-base flex items-center justify-center shrink-0">
+                                ${c.name.charAt(0)}
+                            </div>
+                            <div class="min-w-0">
+                                <h3 class="font-extrabold text-sm text-slate-900 truncate">${c.name}</h3>
+                                <p class="text-xs text-slate-400 mt-0.5 truncate">${c.phone || 'بدون رقم موبايل'}</p>
+                                ${matchedInvoiceBadge}
+                            </div>
+                        </div>
+                        <div class="text-left shrink-0">
+                            <div class="font-extrabold text-xs ${bal.syp > 0 ? 'text-rose-600' : 'text-emerald-600'}">
+                                ${bal.syp > 0 ? `${formatNum(bal.syp)} ل.س` : (bal.usd > 0 ? '' : 'مسدد بالكامل (0)')}
+                            </div>
+                            ${bal.usd > 0 ? `<div class="font-extrabold text-xs text-rose-600 mt-0.5">${formatNum(bal.usd)} $</div>` : ''}
+                            <span class="text-[10px] text-blue-700 font-extrabold inline-flex items-center gap-1 mt-1">
+                                <span>كشف حساب</span>
+                                <i class="fa-solid fa-chevron-left text-[9px]"></i>
+                            </span>
+                        </div>
+                    </div>
+                `;
+            }).join('');
+        };
+
+        window.filterEntryCustomerSelect = function() {
+            const searchInput = document.getElementById('entry-customer-search');
+            const select = document.getElementById('entry-customer-select');
+            const q = (searchInput ? searchInput.value : '').toLowerCase().trim();
+            const currentVal = select.value;
+
+            const matchingCustomers = !q
+                ? customers
+                : customers.filter(c =>
+                    (c.name && c.name.toLowerCase().includes(q)) ||
+                    (c.phone && c.phone.toLowerCase().includes(q))
+                );
+
+            select.innerHTML = '<option value="">-- اختر الزبون --</option>' +
+                matchingCustomers.map(c => `<option value="${c.id}">${c.name}</option>`).join('');
+
+            if (currentVal && matchingCustomers.some(c => c.id === currentVal)) {
+                select.value = currentVal;
+            }
+        };
+
+        function populateCustomerSelect() {
+            const select = document.getElementById('entry-customer-select');
+            const prev = select.value;
+            filterEntryCustomerSelect();
+            if (prev && Array.from(select.options).some(opt => opt.value === prev)) {
+                select.value = prev;
+            }
+        }
+
+        // Customer Detailed Ledger Modal
+        window.openCustomerLedger = function(custId) {
+            activeLedgerCustomerId = custId;
+            renderLedgerModalContent(custId);
+            document.getElementById('modal-customer-ledger').classList.remove('hidden');
+        };
+
+        function renderLedgerModalContent(custId) {
+            const cust = customers.find(c => c.id === custId);
+            if (!cust) return;
+
+            document.getElementById('ledger-cust-name').textContent = cust.name;
+            document.getElementById('ledger-cust-phone').innerHTML = `<i class="fa-solid fa-phone text-blue-600"></i> <span>${cust.phone || 'لا يوجد رقم مسجل'}</span>`;
+
+            const bal = computeCustomerBalance(custId);
+            const sypEl = document.getElementById('ledger-bal-syp');
+            const usdEl = document.getElementById('ledger-bal-usd');
+
+            sypEl.textContent = `${formatNum(bal.syp)} ل.س`;
+            sypEl.className = `font-extrabold text-base ${bal.syp > 0 ? 'text-rose-600' : 'text-emerald-600'}`;
+
+            usdEl.textContent = `${formatNum(bal.usd)} $`;
+            usdEl.className = `font-extrabold text-base ${bal.usd > 0 ? 'text-rose-600' : 'text-emerald-600'}`;
+
+            const custTxs = transactions.filter(t => t.customerId === custId);
+            const listContainer = document.getElementById('ledger-transactions-list');
+
+            if (custTxs.length === 0) {
+                listContainer.innerHTML = `<div class="bg-white rounded-2xl p-6 text-center text-xs text-slate-400">لا توجد فواتير أو دفعات مسجلة لهذا الزبون بعد.</div>`;
+            } else {
+                listContainer.innerHTML = custTxs.map(tx => createTransactionCardHTML(tx, false)).join('');
+            }
+        }
+
+        // Edit Existing Customer & Sync Related Transactions
+        window.openEditCustomerModal = function(custId) {
+            const cust = customers.find(c => c.id === custId);
+            if (!cust) return;
+            document.getElementById('edit-cust-id').value = cust.id;
+            document.getElementById('edit-cust-name').value = cust.name || '';
+            document.getElementById('edit-cust-phone').value = cust.phone || '';
+            document.getElementById('edit-cust-notes').value = cust.notes || '';
+            document.getElementById('modal-edit-customer').classList.remove('hidden');
+        };
+
+        window.saveEditedCustomer = async function(e) {
+            e.preventDefault();
+            const custId = document.getElementById('edit-cust-id').value;
+            const newName = document.getElementById('edit-cust-name').value.trim();
+            const newPhone = document.getElementById('edit-cust-phone').value.trim();
+            const newNotes = document.getElementById('edit-cust-notes').value.trim();
+
+            if (!custId || !newName) return;
+
+            const updatedFields = {
+                name: newName,
+                phone: newPhone,
+                notes: newNotes
+            };
+
+            if (isCloudConnected && firebaseDb) {
+                const shopId = settings.shopCode || 'SOUQ-ELEC-01';
+                await updateDoc(doc(firebaseDb, 'shops', shopId, 'customers', custId), updatedFields);
+
+                const relatedTxs = transactions.filter(t => t.customerId === custId);
+                await Promise.all(relatedTxs.map(tx =>
+                    updateDoc(doc(firebaseDb, 'shops', shopId, 'transactions', tx.id), { customerName: newName })
+                ));
+            } else {
+                customers = customers.map(c => c.id === custId ? { ...c, ...updatedFields } : c);
+                transactions = transactions.map(t => t.customerId === custId ? { ...t, customerName: newName } : t);
+                writeStorage(STORAGE_KEYS.CUSTOMERS, customers);
+                writeStorage(STORAGE_KEYS.TRANSACTIONS, transactions);
+                refreshUI();
+            }
+
+            closeModal('modal-edit-customer');
+            showToast(`تم تحديث بيانات الزبون "${newName}"`, 'success');
+        };
+
+        // WhatsApp Statement Sharing
+        window.shareLedgerWhatsApp = function() {
+            const cust = customers.find(c => c.id === activeLedgerCustomerId);
+            if (!cust) return;
+            const bal = computeCustomerBalance(cust.id);
+            const recentTxs = transactions.filter(t => t.customerId === cust.id).slice(0, 10);
+
+            let msg = `*كشف حساب - محل سوق الكهرباء* ⚡\n`;
+            msg += `السيد/ة: *${cust.name}*\n`;
+            msg += `التاريخ: ${new Date().toLocaleDateString('ar-SY')}\n`;
+            msg += `--------------------------\n`;
+            msg += `*الرصيد الصافي المتبقي:*\n`;
+            if (bal.syp !== 0 || bal.usd === 0) msg += `• بالليرة السورية: *${formatNum(bal.syp)} ل.س*\n`;
+            if (bal.usd !== 0) msg += `• بالدولار الأمريكي: *${formatNum(bal.usd)} $*\n`;
+            msg += `--------------------------\n`;
+            msg += `*آخر الفواتير والدفعات:*\n`;
+            if (recentTxs.length === 0) {
+                msg += `لا توجد حركات مسجلة.\n`;
+            } else {
+                recentTxs.forEach(tx => {
+                    const label = tx.type === 'invoice' ? 'فاتورة' : 'دفعة';
+                    const invStr = tx.invoiceNumber ? ` #${tx.invoiceNumber}` : '';
+                    const curr = tx.currency === 'USD' ? '$' : 'ل.س';
+                    const d = new Date(tx.timestamp).toLocaleDateString('ar-SY', { month: 'short', day: 'numeric' });
+                    const noteTxt = tx.note ? ` (${tx.note})` : '';
+                    msg += `- [${d}] ${label}${invStr}: ${formatNum(tx.amount)} ${curr}${noteTxt}\n`;
+                });
+            }
+            msg += `--------------------------\nشكراً لتعاملكم معنا!`;
+
+            let phone = (cust.phone || '').replace(/\D/g, '');
+            if (phone.startsWith('09') && phone.length === 10) {
+                phone = '963' + phone.substring(1);
+            }
+            const waUrl = phone
+                ? `https://wa.me/${phone}?text=${encodeURIComponent(msg)}`
+                : `https://wa.me/?text=${encodeURIComponent(msg)}`;
+            window.open(waUrl, '_blank');
+        };
+
+        // Multiple Camera / Image Compression via HTML5 Canvas
+        function compressSingleImageFile(file) {
+            return new Promise((resolve, reject) => {
+                const reader = new FileReader();
+                reader.onload = function(e) {
+                    const img = new Image();
+                    img.onload = function() {
+                        const canvas = document.createElement('canvas');
+                        const MAX_WIDTH = 800;
+                        let width = img.width;
+                        let height = img.height;
+                        if (width > MAX_WIDTH) {
+                            height = Math.round((height * MAX_WIDTH) / width);
+                            width = MAX_WIDTH;
+                        }
+                        canvas.width = width;
+                        canvas.height = height;
+                        const ctx = canvas.getContext('2d');
+                        ctx.drawImage(img, 0, 0, width, height);
+                        resolve(canvas.toDataURL('image/jpeg', 0.62));
+                    };
+                    img.onerror = reject;
+                    img.src = e.target.result;
+                };
+                reader.onerror = reject;
+                reader.readAsDataURL(file);
+            });
+        }
+
+        window.processReceiptPhotos = async function(event) {
+            const files = Array.from(event.target.files || []);
+            if (files.length === 0) return;
+
+            try {
+                const compressedBatch = await Promise.all(files.map(file => compressSingleImageFile(file)));
+                compressedPhotosBase64 = compressedPhotosBase64.concat(compressedBatch);
+                renderEntryPhotosPreview();
+            } catch (err) {
+                console.error('Photo compression error:', err);
+                showToast('حدث خطأ أثناء معالجة إحدى الصور', 'error');
+            } finally {
+                event.target.value = '';
+            }
+        };
+
+        function renderEntryPhotosPreview() {
+            const grid = document.getElementById('entry-photos-preview-grid');
+            const counter = document.getElementById('entry-photos-count');
+            counter.textContent = `${compressedPhotosBase64.length} صورة`;
+
+            if (compressedPhotosBase64.length === 0) {
+                grid.classList.add('hidden');
+                grid.innerHTML = '';
+                return;
+            }
+
+            grid.classList.remove('hidden');
+            grid.innerHTML = compressedPhotosBase64.map((src, idx) => `
+                <div class="relative rounded-2xl overflow-hidden border border-slate-200 bg-slate-100 aspect-square">
+                    <img src="${src}" alt="معاينة ${idx + 1}" class="w-full h-full object-cover">
+                    <button type="button" onclick="removeEntryPhoto(${idx})" class="absolute top-1.5 left-1.5 bg-rose-600 text-white w-7 h-7 rounded-full flex items-center justify-center shadow-md" title="حذف الصورة">
+                        <i class="fa-solid fa-trash text-[11px]"></i>
+                    </button>
+                </div>
+            `).join('');
+        }
+
+        window.removeEntryPhoto = function(index) {
+            compressedPhotosBase64.splice(index, 1);
+            renderEntryPhotosPreview();
+        };
+
+        window.clearEntryPhotos = function() {
+            compressedPhotosBase64 = [];
+            const input = document.getElementById('entry-photo-input');
+            if (input) input.value = '';
+            renderEntryPhotosPreview();
+        };
+
+        window.openPhotoViewer = function(txId, startIndex = 0) {
+            const tx = transactions.find(t => t.id === txId);
+            if (!tx) return;
+            const imgs = getTransactionImages(tx);
+            if (imgs.length === 0) return;
+
+            viewerPhotosList = imgs;
+            viewerPhotoIndex = Math.max(0, Math.min(startIndex, imgs.length - 1));
+            const invLabel = tx.invoiceNumber ? ` (#${tx.invoiceNumber})` : '';
+            viewerPhotoCaption = `${tx.customerName || ''}${invLabel} - ${tx.note || 'صورة الفاتورة'}`;
+            updatePhotoViewerDisplay();
+            document.getElementById('modal-photo-viewer').classList.remove('hidden');
+        };
+
+        function updatePhotoViewerDisplay() {
+            const total = viewerPhotosList.length;
+            if (total === 0) return;
+            document.getElementById('photo-viewer-img').src = viewerPhotosList[viewerPhotoIndex];
+            document.getElementById('photo-viewer-caption').textContent = viewerPhotoCaption;
+            document.getElementById('photo-viewer-counter').textContent = `${viewerPhotoIndex + 1} / ${total}`;
+
+            const prevBtn = document.getElementById('photo-prev-btn');
+            const nextBtn = document.getElementById('photo-next-btn');
+            if (total > 1) {
+                prevBtn.classList.remove('hidden');
+                nextBtn.classList.remove('hidden');
+            } else {
+                prevBtn.classList.add('hidden');
+                nextBtn.classList.add('hidden');
+            }
+        }
+
+        window.stepPhotoViewer = function(delta) {
+            if (viewerPhotosList.length <= 1) return;
+            viewerPhotoIndex = (viewerPhotoIndex + delta + viewerPhotosList.length) % viewerPhotosList.length;
+            updatePhotoViewerDisplay();
+        };
+
+        // Save New Customer
+        window.saveNewCustomer = async function(e) {
+            e.preventDefault();
+            const name = document.getElementById('new-cust-name').value.trim();
+            const phone = document.getElementById('new-cust-phone').value.trim();
+            const notes = document.getElementById('new-cust-notes').value.trim();
+            if (!name) return;
+
+            const newCustData = {
+                name,
+                phone,
+                notes,
+                createdAt: Date.now()
+            };
+
+            let createdId = 'cust-' + Date.now();
+            if (isCloudConnected && firebaseDb) {
+                const shopId = settings.shopCode || 'SOUQ-ELEC-01';
+                const docRef = await addDoc(collection(firebaseDb, 'shops', shopId, 'customers'), newCustData);
+                createdId = docRef.id;
+            } else {
+                customers.unshift({ id: createdId, ...newCustData });
+                writeStorage(STORAGE_KEYS.CUSTOMERS, customers);
+                refreshUI();
+            }
+
+            document.getElementById('new-cust-name').value = '';
+            document.getElementById('new-cust-phone').value = '';
+            document.getElementById('new-cust-notes').value = '';
+            closeModal('modal-new-customer');
+            showToast(`تمت إضافة الزبون "${name}"`, 'success');
+
+            if (returnToEntryAfterNewCust) {
+                returnToEntryAfterNewCust = false;
+                document.getElementById('entry-customer-search').value = '';
+                populateCustomerSelect();
+                document.getElementById('entry-customer-select').value = createdId;
+            }
+        };
+
+        // Save Invoice or Payment Entry
+        window.saveTransactionEntry = async function(e) {
+            e.preventDefault();
+            const type = document.getElementById('entry-type').value;
+            const customerId = document.getElementById('entry-customer-select').value;
+            const invoiceNumber = document.getElementById('entry-invoice-number').value.trim();
+            const amount = parseFloat(document.getElementById('entry-amount').value);
+            const currency = document.getElementById('entry-currency').value;
+            const note = document.getElementById('entry-note').value.trim();
+
+            if (!customerId || isNaN(amount) || amount <= 0) {
+                showToast('يرجى اختيار الزبون وإدخال مبلغ صحيح', 'warning');
+                return;
+            }
+
+            const cust = customers.find(c => c.id === customerId);
+            const payload = {
+                type,
+                invoiceNumber,
+                customerId,
+                customerName: cust ? cust.name : '',
+                amount,
+                currency,
+                note,
+                imagesData: [...compressedPhotosBase64],
+                imageData: compressedPhotosBase64[0] || null,
+                author: settings.role,
+                timestamp: Date.now()
+            };
+
+            if (isCloudConnected && firebaseDb) {
+                const shopId = settings.shopCode || 'SOUQ-ELEC-01';
+                await addDoc(collection(firebaseDb, 'shops', shopId, 'transactions'), payload);
+            } else {
+                transactions.unshift({ id: 'tx-' + Date.now(), ...payload });
+                writeStorage(STORAGE_KEYS.TRANSACTIONS, transactions);
+                refreshUI();
+            }
+
+            document.getElementById('entry-invoice-number').value = '';
+            document.getElementById('entry-amount').value = '';
+            document.getElementById('entry-note').value = '';
+            clearEntryPhotos();
+            closeModal('modal-entry');
+            showToast(type === 'invoice' ? 'تم تسجيل الفاتورة بنجاح!' : 'تم تسجيل الدفعة بنجاح!', 'success');
+        };
+
+        // Delete Transaction (Double-tap confirmation without alert/confirm)
+        let pendingDeleteTxId = null;
+        window.confirmDeleteTransaction = async function(txId) {
+            if (pendingDeleteTxId !== txId) {
+                pendingDeleteTxId = txId;
+                showToast('اضغط على سلة الحذف مرة ثانية لتأكيد الحذف', 'warning');
+                setTimeout(() => { if (pendingDeleteTxId === txId) pendingDeleteTxId = null; }, 3500);
+                return;
+            }
+            pendingDeleteTxId = null;
+
+            if (isCloudConnected && firebaseDb) {
+                const shopId = settings.shopCode || 'SOUQ-ELEC-01';
+                await deleteDoc(doc(firebaseDb, 'shops', shopId, 'transactions', txId));
+            } else {
+                transactions = transactions.filter(t => t.id !== txId);
+                writeStorage(STORAGE_KEYS.TRANSACTIONS, transactions);
+                refreshUI();
+            }
+            showToast('تم حذف الحركة', 'success');
+        };
+
+        // Navigation & UI Controls
+        window.switchMainTab = function(tab) {
+            ['dashboard', 'customers', 'sync'].forEach(t => {
+                document.getElementById(`tab-${t}`).classList.add('hidden');
+                const navBtn = document.getElementById(`bnav-${t}`);
+                navBtn.classList.remove('nav-active');
+                navBtn.classList.add('text-slate-400');
+            });
+            document.getElementById(`tab-${tab}`).classList.remove('hidden');
+            const activeBtn = document.getElementById(`bnav-${tab}`);
+            activeBtn.classList.add('nav-active');
+            activeBtn.classList.remove('text-slate-400');
+
+            if (tab === 'dashboard') {
+                document.getElementById('kpi-cards-container').classList.remove('hidden');
+            } else {
+                document.getElementById('kpi-cards-container').classList.add('hidden');
+            }
+        };
+
+        window.setCustomerFilter = function(filter) {
+            currentCustomerFilter = filter;
+            ['all', 'debt', 'clear'].forEach(f => {
+                const btn = document.getElementById(`cfilter-${f}`);
+                btn.className = (f === filter)
+                    ? 'px-3.5 py-1.5 rounded-xl text-xs font-extrabold bg-blue-700 text-white shadow-sm shrink-0'
+                    : 'px-3.5 py-1.5 rounded-xl text-xs font-bold bg-white text-slate-600 border border-slate-200 shrink-0';
+            });
+            renderCustomersList();
+        };
+
+        window.openEntryModal = function(type = 'invoice') {
+            document.getElementById('entry-customer-search').value = '';
+            filterEntryCustomerSelect();
+            setEntryType(type);
+            clearEntryPhotos();
+            document.getElementById('modal-entry').classList.remove('hidden');
+        };
+
+        window.openEntryForLedgerCustomer = function(type) {
+            openEntryModal(type);
+            if (activeLedgerCustomerId) {
+                document.getElementById('entry-customer-select').value = activeLedgerCustomerId;
+            }
+        };
+
+        window.setEntryType = function(type) {
+            document.getElementById('entry-type').value = type;
+            const btnInv = document.getElementById('toggle-invoice');
+            const btnPay = document.getElementById('toggle-payment');
+            const titleEl = document.getElementById('entry-modal-title');
+            const docNumLabel = document.getElementById('entry-doc-number-label');
+            const docNumInput = document.getElementById('entry-invoice-number');
+
+            if (type === 'invoice') {
+                btnInv.className = 'py-2.5 rounded-xl font-extrabold text-xs sm:text-sm transition bg-rose-600 text-white shadow-sm';
+                btnPay.className = 'py-2.5 rounded-xl font-bold text-xs sm:text-sm transition text-slate-600';
+                titleEl.textContent = 'تسجيل فاتورة جديدة (دين)';
+                docNumLabel.textContent = 'رقم الفاتورة';
+                docNumInput.placeholder = 'مثال: INV-104 أو 254';
+            } else {
+                btnPay.className = 'py-2.5 rounded-xl font-extrabold text-xs sm:text-sm transition bg-emerald-600 text-white shadow-sm';
+                btnInv.className = 'py-2.5 rounded-xl font-bold text-xs sm:text-sm transition text-slate-600';
+                titleEl.textContent = 'تسجيل دفعة مقبوضة من زبون';
+                docNumLabel.textContent = 'رقم الإيصال / المرجع (اختياري)';
+                docNumInput.placeholder = 'مثال: REC-55';
+            }
+        };
+
+        window.openNewCustomerModal = function(fromEntry = false) {
+            returnToEntryAfterNewCust = fromEntry;
+            document.getElementById('modal-new-customer').classList.remove('hidden');
+        };
+
+        window.closeModal = function(id) {
+            document.getElementById(id).classList.add('hidden');
+            if (id === 'modal-customer-ledger') {
+                activeLedgerCustomerId = null;
+            }
+        };
+
+        // Role & Sync Settings Handlers
+        window.toggleQuickRole = function() {
+            const nextRole = settings.role === 'صاحب المحل' ? 'المحاسب' : 'صاحب المحل';
+            setDeviceRole(nextRole);
+            showToast(`تم التبديل إلى وضع: ${nextRole}`, 'info');
+        };
+
+        window.setDeviceRole = function(role) {
+            settings.role = role;
+            writeStorage(STORAGE_KEYS.SETTINGS, settings);
+            applySettingsToUI();
+        };
+
+        window.saveShopCodeOnly = function() {
+            const code = document.getElementById('setup-shop-code').value.trim().toUpperCase() || 'SOUQ-ELEC-01';
+            settings.shopCode = code;
+            writeStorage(STORAGE_KEYS.SETTINGS, settings);
+            applySettingsToUI();
+            if (isCloudConnected) {
+                initSyncEngine();
+            }
+            showToast(`تم حفظ رمز ربط المحل: ${code}`, 'success');
+        };
+
+        window.connectFirebaseConfig = function() {
+            const raw = document.getElementById('firebase-config-input').value.trim();
+            const code = document.getElementById('setup-shop-code').value.trim().toUpperCase() || 'SOUQ-ELEC-01';
+            if (!raw) {
+                showToast('يرجى لصق كود إعدادات Firebase أولاً', 'warning');
+                return;
+            }
+
+            try {
+                const normalized = raw
+                    .replace(/(['"])?([a-zA-Z0-9_]+)(['"])?\s*:/g, '"$2": ')
+                    .replace(/'/g, '"');
+                const parsed = JSON.parse(normalized);
+                if (!parsed.apiKey || !parsed.projectId) {
+                    throw new Error('Missing keys');
+                }
+                settings.shopCode = code;
+                settings.firebaseConfig = parsed;
+                writeStorage(STORAGE_KEYS.SETTINGS, settings);
+                applySettingsToUI();
+                initSyncEngine();
+                switchMainTab('dashboard');
+                showToast('جاري الاتصال بقاعدة البيانات السحابية...', 'success');
+            } catch (err) {
+                showToast('صيغة الكود غير صحيحة. انسخ القوسين {...} من إعدادات Firebase', 'error');
+            }
+        };
+
+        window.disconnectFirebaseConfig = function() {
+            settings.firebaseConfig = null;
+            document.getElementById('firebase-config-input').value = '';
+            writeStorage(STORAGE_KEYS.SETTINGS, settings);
+            initSyncEngine();
+            showToast('تم العودة إلى وضع التخزين المحلي', 'info');
+        };
+
+        window.restoreDefaultFirebaseConfig = function() {
+            settings.firebaseConfig = { ...DEFAULT_FIREBASE_CONFIG };
+            document.getElementById('firebase-config-input').value = JSON.stringify(DEFAULT_FIREBASE_CONFIG, null, 2);
+            writeStorage(STORAGE_KEYS.SETTINGS, settings);
+            applySettingsToUI();
+            initSyncEngine();
+            showToast('تمت استعادة إعدادات مشروع Firebase الافتراضية', 'success');
+        };
+
+        // Custom Toast Message Box
+        window.showToast = function(message, type = 'info') {
+            const container = document.getElementById('toast-container');
+            const el = document.createElement('div');
+            let colors = 'bg-slate-900 text-white';
+            let icon = 'fa-circle-info';
+            if (type === 'success') { colors = 'bg-emerald-600 text-white'; icon = 'fa-circle-check'; }
+            if (type === 'warning') { colors = 'bg-amber-500 text-slate-950'; icon = 'fa-triangle-exclamation'; }
+            if (type === 'error') { colors = 'bg-rose-600 text-white'; icon = 'fa-circle-xmark'; }
+
+            el.className = `${colors} px-4 py-3 rounded-2xl shadow-xl text-xs font-extrabold flex items-center gap-2.5 max-w-md w-full transition-all duration-300`;
+            el.innerHTML = `<i class="fa-solid ${icon} text-base"></i><span>${message}</span>`;
+            container.appendChild(el);
+
+            setTimeout(() => {
+                el.style.opacity = '0';
+                el.style.transform = 'translateY(-10px)';
+                setTimeout(() => el.remove(), 300);
+            }, 3000);
+        };
+
+        // Boot App
+        window.addEventListener('DOMContentLoaded', () => {
+            loadAppSettings();
+            initSyncEngine();
+        });
+    </script>
+</body>
+</html>
